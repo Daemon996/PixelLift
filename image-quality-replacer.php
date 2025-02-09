@@ -1,42 +1,46 @@
 <?php
 /**
- * Plugin Name: Image Quality Replacer
- * Description: Dynamically replaces images from low to high quality with lazy loading.
+ * Contributors: Nathan Courtney
+ * Plugin Name: PixelLift
  * Version: 1.0
- * Author: Nathan Courtney
- * License: GPL2
+ * Requires at least: 5.0
+ * Tested up to: 6.4
+ * Requires PHP: 7.4
+ * License: GPL-2.0+
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ * Tags: images, lazy loading, progressive loading, srcset, performance
+ * Website: dev.nathancourtney.com
  */
 
-// Ensure direct access is blocked
-if ( !defined( 'ABSPATH' ) ) exit;
+if (!defined('ABSPATH')) exit; // Prevent direct access
 
-// Register settings page and options
+// Register plugin settings
 function iqr_register_settings() {
-    add_option( 'iqr_image_quality', 'low' ); // default quality setting
-    register_setting( 'iqr_options_group', 'iqr_image_quality' );
+    add_option('iqr_image_quality', 'low');
+    register_setting('iqr_options_group', 'iqr_image_quality');
 }
-add_action( 'admin_init', 'iqr_register_settings' );
+add_action('admin_init', 'iqr_register_settings');
 
-// Add plugin menu in the admin dashboard
+// Add plugin settings page
 function iqr_plugin_menu() {
-    add_options_page( 'Image Quality Replacer', 'Image Quality Replacer', 'manage_options', 'image-quality-replacer', 'iqr_settings_page' );
+    add_options_page('Image Quality Replacer', 'Image Quality Replacer', 'manage_options', 'image-quality-replacer', 'iqr_settings_page');
 }
-add_action( 'admin_menu', 'iqr_plugin_menu' );
+add_action('admin_menu', 'iqr_plugin_menu');
 
-// Settings page to select the starting image quality
+// Display the settings page
 function iqr_settings_page() {
     ?>
     <div class="wrap">
         <h1>Image Quality Replacer Settings</h1>
         <form method="post" action="options.php">
-            <?php settings_fields( 'iqr_options_group' ); ?>
+            <?php settings_fields('iqr_options_group'); ?>
             <table class="form-table">
                 <tr valign="top">
                     <th scope="row">Starting Image Quality</th>
                     <td>
                         <select name="iqr_image_quality">
-                            <option value="low" <?php selected( get_option('iqr_image_quality'), 'low' ); ?>>Low Quality</option>
-                            <option value="medium" <?php selected( get_option('iqr_image_quality'), 'medium' ); ?>>Medium Quality</option>
+                            <option value="low" <?php selected(get_option('iqr_image_quality'), 'low'); ?>>Low Quality</option>
+                            <option value="medium" <?php selected(get_option('iqr_image_quality'), 'medium'); ?>>Medium Quality</option>
                         </select>
                     </td>
                 </tr>
@@ -47,191 +51,47 @@ function iqr_settings_page() {
     <?php
 }
 
-// Modify the content of posts to replace image sources with low quality first
-function iqr_replace_image_quality( $content ) {
-    // Get the starting image quality from settings
-    $start_quality = get_option( 'iqr_image_quality', 'low' );
+// Modify image attributes to start with the lowest quality
+function iqr_modify_image_attributes($attributes, $attachment, $size) {
+    if (!isset($attributes['srcset'])) {
+        return $attributes; // Skip if no srcset available
+    }
 
-    // Define the image sizes based on quality
-    $image_sizes = array(
-        'low' => 'thumbnail',   // low-quality size
-        'medium' => 'medium',   // medium-quality size
-        'high' => 'full',       // full-quality size
-    );
+    $srcset = wp_parse_srcset($attributes['srcset']);
+    if (empty($srcset)) {
+        return $attributes;
+    }
 
-    // Use regex to find all image tags
-    preg_match_all( '/<img [^>]+>/', $content, $matches );
+    // Get available image sizes sorted by resolution (low to high)
+    ksort($srcset);
 
-    foreach ( $matches[0] as $img_tag ) {
-        // Modify the image tags to change the source based on the selected quality
-        if ( strpos( $img_tag, 'class="wp-image' ) !== false ) {
-            $img_tag = preg_replace_callback( '/src="([^"]+)"/', function( $matches ) use ( $start_quality, $image_sizes ) {
-                $image_url = $matches[1];
-                $path_parts = pathinfo( $image_url );
-                // Replace the image filename with the corresponding quality size
-                $new_url = str_replace( $path_parts['basename'], $image_sizes[$start_quality] . '-' . $path_parts['basename'], $image_url );
-                return 'src="' . $new_url . '"';
-            }, $img_tag );
+    // Get the original image size requested by the author
+    $original_src = $attributes['src'];
 
-            // Add lazy-loading to the image
-            $img_tag = preg_replace( '/<img /', '<img loading="lazy" ', $img_tag );
+    // Identify the best matching size within the limit
+    $available_sizes = array_values($srcset);
+    $chosen_size = $available_sizes[0]['url']; // Start with the lowest
 
-            // Replace the image tag in content
-            $content = str_replace( $matches[0], $img_tag, $content );
+    foreach ($available_sizes as $size_option) {
+        if (strpos($original_src, $size_option['url']) !== false) {
+            $chosen_size = $size_option['url']; // Match the originally requested size
+            break;
         }
     }
 
-    return $content;
-}
-add_filter( 'the_content', 'iqr_replace_image_quality' );
-add_filter( 'wp_get_attachment_image', 'iqr_replace_image_quality' );
+    // Set the initial image to the lowest available size
+    $attributes['src'] = $chosen_size;
+    $attributes['data-srcset'] = $attributes['srcset']; // Store the full srcset for JS
+    $attributes['data-original'] = $original_src; // Preserve the original user-selected size
+    $attributes['class'] .= ' iqr-lazy'; // Add a class for JS
+    $attributes['loading'] = 'lazy'; // Enable lazy loading
 
-// Add the necessary JavaScript for dynamically loading medium and high-quality images
+    return $attributes;
+}
+add_filter('wp_get_attachment_image_attributes', 'iqr_modify_image_attributes', 10, 3);
+
+// Enqueue the JavaScript file
 function iqr_enqueue_scripts() {
-    wp_enqueue_script( 'iqr-image-quality', plugin_dir_url( __FILE__ ) . 'js/image-quality-replacer.js', array(), '1.0', true );
+    wp_enqueue_script('iqr-image-quality', plugin_dir_url(__FILE__) . 'js/image-quality-replacer.js', array(), '1.0', true);
 }
-add_action( 'wp_footer', 'iqr_enqueue_scripts' );
-
-// Add inline script to make sure images are replaced after page load
-function iqr_inline_js() {
-    ?>
-    <script type="text/javascript">
-        document.addEventListener('DOMContentLoaded', function() {
-            let images = document.querySelectorAll('img[loading="lazy"]');
-            images.forEach(function(img) {
-                let lowQualitySrc = img.src;
-                let mediumQualitySrc = lowQualitySrc.replace('low', 'medium');
-                let highQualitySrc = lowQualitySrc.replace('low', 'full');
-                
-                // Load medium quality after a brief delay
-                setTimeout(function() {
-                    img.src = mediumQualitySrc;
-                    setTimeout(function() {
-                        img.src = highQualitySrc;
-                    }, 1000); // Change to high quality after a brief delay
-                }, 500); // Change to medium quality after a brief delay
-            });
-        });
-    </script>
-    </script>
-    <?php
-}
-add_action( 'wp_footer', 'iqr_inline_js' );<?php
-/**
- * Plugin Name: Image Quality Replacer
- * Description: Dynamically replaces images from low to high quality with lazy loading.
- * Version: 1.0
- * Author: Your Name
- * License: GPL2
- */
-
-// Ensure direct access is blocked
-if ( !defined( 'ABSPATH' ) ) exit;
-
-// Register settings page and options
-function iqr_register_settings() {
-    add_option( 'iqr_image_quality', 'low' ); // default quality setting
-    register_setting( 'iqr_options_group', 'iqr_image_quality' );
-}
-add_action( 'admin_init', 'iqr_register_settings' );
-
-// Add plugin menu in the admin dashboard
-function iqr_plugin_menu() {
-    add_options_page( 'Image Quality Replacer', 'Image Quality Replacer', 'manage_options', 'image-quality-replacer', 'iqr_settings_page' );
-}
-add_action( 'admin_menu', 'iqr_plugin_menu' );
-
-// Settings page to select the starting image quality
-function iqr_settings_page() {
-    ?>
-    <div class="wrap">
-        <h1>Image Quality Replacer Settings</h1>
-        <form method="post" action="options.php">
-            <?php settings_fields( 'iqr_options_group' ); ?>
-            <table class="form-table">
-                <tr valign="top">
-                    <th scope="row">Starting Image Quality</th>
-                    <td>
-                        <select name="iqr_image_quality">
-                            <option value="low" <?php selected( get_option('iqr_image_quality'), 'low' ); ?>>Low Quality</option>
-                            <option value="medium" <?php selected( get_option('iqr_image_quality'), 'medium' ); ?>>Medium Quality</option>
-                        </select>
-                    </td>
-                </tr>
-            </table>
-            <?php submit_button(); ?>
-        </form>
-    </div>
-    <?php
-}
-
-// Modify the content of posts to replace image sources with low quality first
-function iqr_replace_image_quality( $content ) {
-    // Get the starting image quality from settings
-    $start_quality = get_option( 'iqr_image_quality', 'low' );
-
-    // Define the image sizes based on quality
-    $image_sizes = array(
-        'low' => 'thumbnail',   // low-quality size
-        'medium' => 'medium',   // medium-quality size
-        'high' => 'full',       // full-quality size
-    );
-
-    // Use regex to find all image tags
-    preg_match_all( '/<img [^>]+>/', $content, $matches );
-
-    foreach ( $matches[0] as $img_tag ) {
-        // Modify the image tags to change the source based on the selected quality
-        if ( strpos( $img_tag, 'class="wp-image' ) !== false ) {
-            $img_tag = preg_replace_callback( '/src="([^"]+)"/', function( $matches ) use ( $start_quality, $image_sizes ) {
-                $image_url = $matches[1];
-                $path_parts = pathinfo( $image_url );
-                // Replace the image filename with the corresponding quality size
-                $new_url = str_replace( $path_parts['basename'], $image_sizes[$start_quality] . '-' . $path_parts['basename'], $image_url );
-                return 'src="' . $new_url . '"';
-            }, $img_tag );
-
-            // Add lazy-loading to the image
-            $img_tag = preg_replace( '/<img /', '<img loading="lazy" ', $img_tag );
-
-            // Replace the image tag in content
-            $content = str_replace( $matches[0], $img_tag, $content );
-        }
-    }
-
-    return $content;
-}
-add_filter( 'the_content', 'iqr_replace_image_quality' );
-add_filter( 'wp_get_attachment_image', 'iqr_replace_image_quality' );
-
-// Add the necessary JavaScript for dynamically loading medium and high-quality images
-function iqr_enqueue_scripts() {
-    wp_enqueue_script( 'iqr-image-quality', plugin_dir_url( __FILE__ ) . 'js/image-quality-replacer.js', array(), '1.0', true );
-}
-add_action( 'wp_footer', 'iqr_enqueue_scripts' );
-
-// Add inline script to make sure images are replaced after page load
-function iqr_inline_js() {
-    ?>
-    <script type="text/javascript">
-        document.addEventListener('DOMContentLoaded', function() {
-            let images = document.querySelectorAll('img[loading="lazy"]');
-            images.forEach(function(img) {
-                let lowQualitySrc = img.src;
-                let mediumQualitySrc = lowQualitySrc.replace('low', 'medium');
-                let highQualitySrc = lowQualitySrc.replace('low', 'full');
-                
-                // Load medium quality after a brief delay
-                setTimeout(function() {
-                    img.src = mediumQualitySrc;
-                    setTimeout(function() {
-                        img.src = highQualitySrc;
-                    }, 1000); // Change to high quality after a brief delay
-                }, 500); // Change to medium quality after a brief delay
-            });
-        });
-    </script>
-    </script>
-    <?php
-}
-add_action( 'wp_footer', 'iqr_inline_js' );
+add_action('wp_enqueue_scripts', 'iqr_enqueue_scripts');
